@@ -1,0 +1,1114 @@
+#!/bin/bash
+
+set -e
+
+BASE="/opt/geogebra"
+GGB="$BASE/ggb"
+WWW="$BASE/www"
+OPEN="$WWW/open"
+
+CHROME_BASE="/opt/chrome"
+CHROME="$CHROME_BASE/chrome"
+
+DESKTOP="/usr/share/applications/geogebra-local.desktop"
+
+GGB_URL="https://download.geogebra.org/package/geogebra-math-apps-bundle"
+CHROME_JSON_URL="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+
+FORCE=false
+EXAM_MODE=false
+
+
+# ============================================================
+# Parameter
+# ============================================================
+
+for ARG in "$@"; do
+   case "$ARG" in
+      --force)
+         FORCE=true
+         ;;
+
+      --exam)
+         EXAM_MODE=true
+         ;;
+
+      --uninstall)
+         if [ "$(id -u)" -ne 0 ]; then
+            echo "FEHLER: Dieses Skript muss als root ausgeführt werden."
+            exit 1
+         fi
+
+         echo "Entferne GeoGebra ..."
+
+         for FILE in /usr/share/applications/*.desktop; do
+            [ -f "$FILE" ] || continue
+
+            if grep -q '/opt/geogebra/start.sh' "$FILE"; then
+               rm -f "$FILE"
+            fi
+         done
+
+         rm -rf "$BASE"
+
+         update-desktop-database \
+            /usr/share/applications \
+            2>/dev/null || true
+
+         echo
+         echo "GeoGebra wurde entfernt."
+         echo "/opt/chrome wurde beibehalten."
+
+         exit 0
+         ;;
+
+      *)
+         echo "Unbekannter Parameter: $ARG"
+         echo
+         echo "Verwendung:"
+         echo "   $0"
+         echo "   $0 --force"
+         echo "   $0 --exam"
+         echo "   $0 --exam --force"
+         echo "   $0 --uninstall"
+         exit 1
+         ;;
+   esac
+done
+
+
+# ============================================================
+# Root
+# ============================================================
+
+if [ "$(id -u)" -ne 0 ]; then
+   echo "FEHLER: Dieses Skript muss als root ausgeführt werden."
+   exit 1
+fi
+
+
+# ============================================================
+# Voraussetzungen
+# ============================================================
+
+for CMD in curl unzip python3; do
+   if ! command -v "$CMD" >/dev/null 2>&1; then
+      echo "FEHLER: $CMD fehlt."
+      exit 1
+   fi
+done
+
+
+TMP="$(mktemp -d /tmp/geogebra-install-XXXXXX)"
+
+
+cleanup() {
+   rm -rf "$TMP"
+}
+
+
+trap cleanup EXIT
+
+
+mkdir -p "$BASE"
+
+
+# ============================================================
+# Chrome
+# ============================================================
+
+if [ "$FORCE" = true ] || [ ! -x "$CHROME" ]; then
+
+   echo
+   echo "Ermittle aktuelle Chrome-Stable-Version ..."
+
+   curl -fL \
+      "$CHROME_JSON_URL" \
+      -o "$TMP/chrome.json"
+
+
+   CHROME_URL="$(
+      python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+   data = json.load(f)
+
+for item in data["channels"]["Stable"]["downloads"]["chrome"]:
+   if item["platform"] == "linux64":
+      print(item["url"])
+      break
+' "$TMP/chrome.json"
+   )"
+
+
+   if [ -z "$CHROME_URL" ]; then
+      echo "FEHLER: Chrome-Download konnte nicht ermittelt werden."
+      exit 1
+   fi
+
+
+   echo "Lade Chrome ..."
+
+   curl -fL \
+      "$CHROME_URL" \
+      -o "$TMP/chrome.zip"
+
+
+   mkdir "$TMP/chrome"
+
+   unzip -q \
+      "$TMP/chrome.zip" \
+      -d "$TMP/chrome"
+
+
+   if [ ! -x "$TMP/chrome/chrome-linux64/chrome" ]; then
+      echo "FEHLER: Chrome-Archiv ist unvollständig."
+      exit 1
+   fi
+
+
+   rm -rf "$CHROME_BASE"
+
+   mv \
+      "$TMP/chrome/chrome-linux64" \
+      "$CHROME_BASE"
+
+   chmod -R a+rX "$CHROME_BASE"
+
+else
+
+   echo
+   echo "Vorhandenes Chrome wird verwendet."
+
+fi
+
+
+# ============================================================
+# GeoGebra
+# ============================================================
+
+if [ "$FORCE" = true ] ||
+   [ ! -f "$GGB/GeoGebra/deployggb.js" ]; then
+
+   echo
+   echo "Lade GeoGebra Math Apps Bundle ..."
+
+   curl -fL \
+      "$GGB_URL" \
+      -o "$TMP/geogebra.zip"
+
+
+   mkdir "$TMP/geogebra"
+
+   unzip -q \
+      "$TMP/geogebra.zip" \
+      -d "$TMP/geogebra"
+
+
+   DEPLOY="$(
+      find "$TMP/geogebra" \
+         -type f \
+         -path '*/GeoGebra/deployggb.js' \
+         -print \
+         -quit
+   )"
+
+
+   if [ -z "$DEPLOY" ]; then
+      echo "FEHLER: GeoGebra/deployggb.js wurde nicht gefunden."
+      exit 1
+   fi
+
+
+   SOURCE="$(dirname "$(dirname "$DEPLOY")")"
+
+
+   if [ ! -f "$SOURCE/GeoGebra/HTML5/5.0/web3d/web3d.nocache.js" ]; then
+      echo "FEHLER: GeoGebra web3d wurde nicht gefunden."
+      exit 1
+   fi
+
+
+   rm -rf "$GGB"
+
+   mkdir -p "$GGB"
+
+   cp -a \
+      "$SOURCE/." \
+      "$GGB/"
+
+
+   if [ ! -f "$GGB/GeoGebra/HTML5/5.0/web3d/web3d.nocache.js" ]; then
+      echo "FEHLER: GeoGebra-Installation ist unvollständig."
+      exit 1
+   fi
+
+else
+
+   echo
+   echo "Vorhandenes GeoGebra-Bundle wird verwendet."
+
+fi
+
+
+# ============================================================
+# Verzeichnisse
+# ============================================================
+
+mkdir -p \
+   "$WWW" \
+   "$OPEN"
+
+chmod 1777 "$OPEN"
+
+
+# ============================================================
+# Konfiguration
+# ============================================================
+
+cat > "$BASE/config" <<EOF
+EXAM_MODE=$EXAM_MODE
+EOF
+
+chmod 644 "$BASE/config"
+
+
+# ============================================================
+# Lokaler Webserver
+#
+# WICHTIG:
+# /GeoGebra/... zeigt auf
+# /opt/geogebra/ggb/GeoGebra/...
+# ============================================================
+
+cat > "$BASE/server.py" <<'PYEOF'
+#!/usr/bin/env python3
+
+import http.server
+import os
+import posixpath
+import urllib.parse
+
+
+HOST = "127.0.0.1"
+PORT = 8765
+
+WWW_ROOT = "/opt/geogebra/www"
+GGB_ROOT = "/opt/geogebra/ggb/GeoGebra"
+
+
+class GeoGebraHandler(http.server.SimpleHTTPRequestHandler):
+
+   def translate_path(self, path):
+
+      path = urllib.parse.urlparse(path).path
+      path = urllib.parse.unquote(path)
+
+      if path == "/GeoGebra":
+         path = "/GeoGebra/"
+
+      if path.startswith("/GeoGebra/"):
+         root = GGB_ROOT
+         relative = path[len("/GeoGebra/"):]
+      else:
+         root = WWW_ROOT
+         relative = path.lstrip("/")
+
+      relative = posixpath.normpath(relative)
+
+      parts = [
+         part
+         for part in relative.split("/")
+         if part not in ("", ".", "..")
+      ]
+
+      result = root
+
+      for part in parts:
+         result = os.path.join(result, part)
+
+      return result
+
+
+   def end_headers(self):
+      self.send_header(
+         "Cache-Control",
+         "no-cache, no-store, must-revalidate"
+      )
+      self.send_header(
+         "Pragma",
+         "no-cache"
+      )
+      self.send_header(
+         "Expires",
+         "0"
+      )
+
+      super().end_headers()
+
+
+   def log_message(self, fmt, *args):
+      pass
+
+
+def main():
+
+   server = http.server.ThreadingHTTPServer(
+      (HOST, PORT),
+      GeoGebraHandler
+   )
+
+   server.serve_forever()
+
+
+if __name__ == "__main__":
+   main()
+PYEOF
+
+chmod 755 "$BASE/server.py"
+
+
+# ============================================================
+# index.html
+# ============================================================
+
+if [ "$EXAM_MODE" = true ]; then
+   ENABLE_3D="false"
+else
+   ENABLE_3D="true"
+fi
+
+
+cat > "$WWW/index.html" <<EOF
+<!DOCTYPE html>
+
+<html lang="de">
+
+<head>
+
+   <meta charset="utf-8">
+
+   <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1"
+   >
+
+   <title>GeoGebra</title>
+
+
+   <style>
+
+      html,
+      body {
+         margin: 0;
+         padding: 0;
+
+         width: 100%;
+         height: 100%;
+
+         overflow: hidden;
+      }
+
+
+      body {
+         position: fixed;
+
+         top: 0;
+         left: 0;
+
+         width: 100%;
+         height: 100%;
+
+         color: #666;
+
+         font-size: 14px;
+         font-family: sans-serif;
+
+         touch-action: none;
+
+         -webkit-tap-highlight-color:
+            rgba(255,255,255,0);
+      }
+
+
+      #ggw {
+         position: absolute;
+
+         top: 0;
+         left: 0;
+
+         width: 100%;
+         height: 100%;
+      }
+
+
+      /*
+       * Nativer GeoGebra-Suite-App-Picker.
+       *
+       * Die Funktionalität stammt von GeoGebra selbst.
+       * Wir verändern ausschließlich seine Darstellung
+       * und Position.
+       */
+
+      #suiteAppPicker {
+         position: fixed !important;
+
+         left: 12px !important;
+         bottom: 12px !important;
+
+         top: auto !important;
+         right: auto !important;
+
+         margin: 0 !important;
+
+         z-index: 2147483000 !important;
+      }
+
+
+      /*
+       * Beschriftungen des Auswahlknopfs ausblenden.
+       */
+
+      #suiteAppPicker span,
+      #suiteAppPicker .gwt-Label {
+         display: none !important;
+      }
+
+
+      /*
+       * Pfeile / Dropdown-Indikatoren ausblenden.
+       */
+
+      #suiteAppPicker svg:not(:first-child),
+      #suiteAppPicker [class*="arrow"],
+      #suiteAppPicker [class*="Arrow"],
+      #suiteAppPicker [class*="chevron"],
+      #suiteAppPicker [class*="Chevron"],
+      #suiteAppPicker [class*="dropdown"],
+      #suiteAppPicker [class*="Dropdown"] {
+         display: none !important;
+      }
+
+
+      /*
+       * Der sichtbare Hauptknopf soll nur das Icon zeigen.
+       */
+
+      #suiteAppPicker button {
+         min-width: 48px !important;
+         width: 48px !important;
+
+         min-height: 48px !important;
+         height: 48px !important;
+
+         padding: 6px !important;
+
+         overflow: hidden !important;
+      }
+
+
+      #suiteAppPicker img {
+         width: 36px !important;
+         height: 36px !important;
+
+         object-fit: contain !important;
+      }
+
+   </style>
+
+
+   <script>
+
+      var appID = "suite";
+
+      var module = "web3d";
+
+      var codebase =
+         "/GeoGebra/HTML5/5.0/";
+
+
+      var defaultParams = {
+
+         vendor: "GeoGebra",
+
+         preloadModules: "",
+
+         marginTop: 0,
+
+         language: "de",
+
+         enableCAS: true,
+
+         enable3d: $ENABLE_3D,
+
+         enableFileFeatures: true,
+
+         showAppsPicker: true
+
+      };
+
+
+      /*
+       * Die sechs vom Benutzer gelieferten Originalsymbole.
+       */
+
+      const APP_ICONS = {
+
+         graphing:
+            "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiPjxkZWZzPjxwYXRoIGlkPSJhIiBkPSJNNDg1IDQ0MC4yNGMwIDI0LjcyLTIwLjA0IDQ0Ljc2LTQ0Ljc2IDQ0Ljc2SDcxLjc2QzQ3LjA0IDQ4NSAyNyA0NjQuOTYgMjcgNDQwLjI0VjcxLjc2QzI3IDQ3LjA0IDQ3LjA0IDI3IDcxLjc2IDI3aDM2OC40OEM0NjQuOTYgMjcgNDg1IDQ3LjA0IDQ4NSA3MS43NnoiLz48L2RlZnM+PGNsaXBQYXRoIGlkPSJiIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgb3ZlcmZsb3c9InZpc2libGUiLz48L2NsaXBQYXRoPjxnIGNsaXAtcGF0aD0idXJsKCNiKSI+PHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjY2IiBzdHJva2UtbWl0ZXJsaW1pdD0iMTAiIHN0cm9rZS13aWR0aD0iMzAiIGQ9Ik00NCA0ODAuMDk0Qzg1Ljc4IDIwMi4xNyAxNTAuNzYtMzYuNzY2IDI1NS43OTMgMjU2LjA3IDM2MS42OSA1NTEuMzIgNDIzLjMyNSAzMDkuOTcgNDY4IDMxLjkwOCIvPjxjaXJjbGUgY3g9IjE2My45NTMiIGN5PSIxMjEuOTU0IiByPSI2My4wNDciIGZpbGw9IiM5OWYiLz48cGF0aCBmaWxsPSIjMzMzIiBkPSJNMTYzLjk1MyA1OC45MDZjLTM0LjgxNyAwLTYzLjA0NyAyOC4yMzMtNjMuMDQ3IDYzLjA0NyAwIDM0LjgyMyAyOC4yMyA2My4wNDcgNjMuMDQ3IDYzLjA0N1MyMjcgMTU2Ljc3NyAyMjcgMTIxLjk1M2MwLTM0LjgxNC0yOC4yMy02My4wNDctNjMuMDQ3LTYzLjA0N20wIDEwNy4xOGMtMjQuMzc0IDAtNDQuMTMzLTE5Ljc2LTQ0LjEzMy00NC4xMzNzMTkuNzYtNDQuMTMzIDQ0LjEzMy00NC4xMzMgNDQuMTMzIDE5Ljc2IDQ0LjEzMyA0NC4xMzMtMTkuNzYgNDQuMTMzLTQ0LjEzMyA0NC4xMzMiLz48Y2lyY2xlIGN4PSIzNDYuMDQ3IiBjeT0iMzkxLjA0OCIgcj0iNjMuMDQ3IiBmaWxsPSIjOTlmIi8+PHBhdGggZmlsbD0iIzMzMyIgZD0iTTM0Ni4wNDcgMzI4QzMxMS4yMyAzMjggMjgzIDM1Ni4yMzMgMjgzIDM5MS4wNDdjMCAzNC44MjMgMjguMjMgNjMuMDQ3IDYzLjA0NyA2My4wNDdzNjMuMDQ3LTI4LjIyMyA2My4wNDctNjMuMDQ3YzAtMzQuODE0LTI4LjIzLTYzLjA0Ny02My4wNDctNjMuMDQ3bTAgMTA3LjE4Yy0yNC4zNzQgMC00NC4xMzMtMTkuNzYtNDQuMTMzLTQ0LjEzNHMxOS43Ni00NC4xMzMgNDQuMTMzLTQ0LjEzMyA0NC4xMzMgMTkuNzYgNDQuMTMzIDQ0LjEzMy0xOS43NiA0NC4xMzMtNDQuMTMzIDQ0LjEzM3oiLz48L2c+PC9zdmc+",
+
+         "3d":
+            "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgdmlld0JveD0iMCAwIDIwIDIwIj48cGF0aCBmaWxsPSIjMzMzIiBkPSJtLjk3MiAxNS4zMjggNy44OC0xMi45NjJMNi43NDYgMTguMzgiLz48cGF0aCBmaWxsPSIjNjY2IiBkPSJNNi43NDYgMTguMzggOC44NTIgMi4zNjZsOS45NyAxMy42OCIvPjxwYXRoIGZpbGw9IiM2MTYxZmYiIGQ9Ik0yLjI2NyAxNC45OTIgNy4zMyA2LjY1NSA2LjAxIDE2LjkzMyIvPjxwYXRoIGZpbGw9IiM5OWYiIGQ9Ik03LjgxMiAxNy4yNSA5LjQzNiA0Ljc0bDcuNzY2IDEwLjY5NiIvPjwvc3ZnPg==",
+
+         geometry:
+            "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiB2aWV3Qm94PSIwIDAgNTEyIDUxMiI+PGNpcmNsZSBjeD0iMTc1IiBjeT0iMzM2IiByPSIxMjMiIGZpbGw9IiM5OWYiLz48cGF0aCBmaWxsPSIjNjY2IiBkPSJNMTE5LjY2NyAzNDMuMzg4IDMwMi4zMzMgMjcgNDg1IDM0My4zODgiLz48cGF0aCBmaWxsPSIjOTlmIiBkPSJNMTY5LjExNyAzMTQuODM4IDMwMi4zMzMgODQuMSA0MzUuNTUgMzE0Ljg0Ii8+PHBhdGggZmlsbD0iIzYxNjFmZiIgZD0ibTE0OC45NDQgMzI3IDczLjM5LTEyNC40OTRDMjc5Ljc2NCAyMjkuNDkgMzExLjI4IDI2OS43MiAzMDkuNDM2IDMyN3oiLz48cGF0aCBmaWxsPSIjNjY2IiBkPSJNMTc1IDQ4NmMtODIuODQzIDAtMTUwLTY3LjE1Ny0xNTAtMTUwczY3LjE1Ny0xNTAgMTUwLTE1MCAxNTAgNjcuMTU3IDE1MCAxNTAtNjcuMTU3IDE1MC0xNTAgMTUwbTEyMy0xNTBjMC02Ny45My01NS4wNy0xMjMtMTIzLTEyM1M1MiAyNjguMDcgNTIgMzM2czU1LjA3IDEyMyAxMjMgMTIzIDEyMy01NS4wNyAxMjMtMTIzIi8+PHBhdGggZmlsbD0iIzMzMyIgZD0iTTMyNC44MiAzNDMuMzg4SDExOS42NjhsODguNzE1LTE1My42NmExNDkgMTQ5IDAgMCAxIDI3LjY0NyA5LjIwOGM0Ni4yNjMgMjAuNjMgODAuMTYgNjMuOTk3IDg3LjQ5IDExNS45YTE1MS41IDE1MS41IDAgMCAxIDEuMyAyOC41NTJNMjIyLjQ0IDIyMi40OGwtNTMuMzIzIDkyLjM1OGgxMjcuMDNjLTcuMjU0LTQxLjgyNS0zNS42My03Ni40MDYtNzMuNzQyLTkyLjM1NCIvPjwvc3ZnPg==",
+
+         cas:
+            "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiB2aWV3Qm94PSIwIDAgNTEyIDUxMiI+PHRpdGxlPmNhczwvdGl0bGU+PHBhdGggZD0iTTE1MCAwaDMxMmE1MCA1MCAwIDAgMSA1MCA1MHY0MTJhNTAgNTAgMCAwIDEtNTAgNTBIMTUweiIgc3R5bGU9ImZpbGw6I2ZmZiIvPjxwYXRoIGQ9Ik0xNTAgNTEySDUwYTUwIDUwIDAgMCAxLTUwLTUwVjUwQTUwIDUwIDAgMCAxIDUwIDBoMTAwWiIgc3R5bGU9ImZpbGw6Izk5ZiIvPjxwYXRoIGQ9Ik0zNjEgMzQ3aC01Ni4wN2wtMzkuMy02Mi41NUwyMjkuMDUgMzQ3aC01Mi42M0wyMzkgMjUzLjM1IDE4Mi41NyAxNzJoNTUuNzFsMzQuNTIgNTEuNjFMMzAyLjU0IDE3Mmg1Mi4zbC01NSA4MS4zNVptMTI0LjUtMTA3aC0xMDl2LTIxaDEwOVptMCA2MWgtMTA5di0yMWgxMDlaIiBzdHlsZT0iZmlsbDojNjY2Ii8+PC9zdmc+",
+
+         probability:
+            "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2aWV3Qm94PSIwIDAgNTEyIDUxMiI+PGRlZnM+PHBhdGggaWQ9ImEiIGQ9Ik00ODUgNDQwLjI0YzAgMjQuNzItMjAuMDQgNDQuNzYtNDQuNzYgNDQuNzZINzEuNzZDNDcuMDQgNDg1IDI3IDQ2NC45NiAyNyA0NDAuMjRWNzEuNzZDMjcgNDcuMDQgNDcuMDQgMjcgNzEuNzYgMjdoMzY4LjQ4QzQ2NC45NiAyNyA0ODUgNDcuMDQgNDg1IDcxLjc2eiIvPjwvZGVmcz48Y2xpcFBhdGggaWQ9ImIiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBvdmVyZmxvdz0idmlzaWJsZSIvPjwvY2xpcFBhdGg+PGcgY2xpcC1wYXRoPSJ1cmwoI2IpIj48cGF0aCBmaWxsPSIjOTlmIiBkPSJNMTU1LjU2NCA0NDYuNTFoMjAwLjg3M1YxODAuNTI0QzMxMC44NDcgMTA4LjEwNyAyODEuMzAyIDczLjI0IDI1NiA3My4yNHMtNTQuODQ3IDM0Ljg2Ny0xMDAuNDM2IDEwNy4yODN6Ii8+PHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjY2IiBzdHJva2UtbWl0ZXJsaW1pdD0iMTAiIHN0cm9rZS13aWR0aD0iMjYiIGQ9Ik02MDkgNDIyLjk2OHMtMTMwLjk3IDIxLjQwNS0yMDcuMDYtMTQ3LjdDMzI1Ljg1IDEwNi4xNiAyODcuMTg0IDY1LjQ4NyAyNTYgNjUuNDg3cy02OS44NSA0MC42NzItMTQ1Ljk0IDIwOS43NzhTLTk3IDQyMi45NjgtOTcgNDIyLjk2OCIvPjxwYXRoIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLW1pdGVybGltaXQ9IjEwIiBzdHJva2Utd2lkdGg9IjI2IiBkPSJNLTk3IDQ0Ni41MWg3MDYiLz48L2c+PC9zdmc+",
+
+         scientific:
+            "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIj48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxyZWN0IHdpZHRoPSI0NTgiIGhlaWdodD0iNDU4IiB4PSIyNyIgeT0iMjciIGZpbGw9Im5vbmUiIHJ4PSI0NC43NiIvPjwvY2xpcFBhdGg+PC9kZWZzPjxnIGNsaXAtcGF0aD0idXJsKCNhKSI+PHBhdGggZmlsbD0iIzk5ZiIgZD0iTTAgMzMxLjFoNTEyVjQ3NUgweiIvPjxwYXRoIGZpbGw9IiM2NjYiIGQ9Ik0wLS43N2g1MTJ2NTEzLjU0SDB6bTQ2NyA4Mi44OUM0NjcgNTkuNDEgNDUzLjU5IDQ2IDQzMC44OCA0Nkg4Mi4xMkM1OS40MSA0NiA0NiA1OS40MSA0NiA4Mi4xMnYzNDguNzZDNDYgNDUzLjU5IDU5LjQxIDQ2NyA4Mi4xMiA0NjdoMzQ4Ljc2YzIyLjcxIDAgMzYuMTItMTMuNDEgMzYuMTItMzYuMTJ6Ii8+PHBhdGggZmlsbD0iIzY2NiIgZD0iTTAgMTczLjY3aDUxMnYxOEgwem0wIDE0Ni42Nmg1MTJ2MThIMHoiLz48L2c+PHBhdGggZmlsbD0iIzY2NiIgZD0iTTE1OS41IDk5LjY2di0zOGgxOXYzOGgzOC4yNXYxOS42OEgxNzguNXYzOGgtMTl2LTM4aC0zOC4yNVY5OS42NnptLTM4LjMgMTQ2LjQyaDk1LjZ2MTkuNjdoLTk1LjZ6Ii8+PHBhdGggZmlsbD0iIzMzMyIgZD0iTTIxNi44IDM3MS44OHYxOS42N2gtOTUuNnYtMTkuNjd6bTAgNDEuNFY0MzNoLTk1LjZ2LTE5LjcyeiIvPjwvc3ZnPg=="
+
+      };
+
+
+      function setParam(name, value) {
+
+         document
+            .getElementById("ggw")
+            .setAttribute(
+               "data-param-" + name,
+               value
+            );
+
+      }
+
+
+      function getURLParam(name) {
+
+         return new URLSearchParams(
+            window.location.search
+         ).get(name);
+
+      }
+
+
+      function configure() {
+
+         Object.keys(defaultParams).forEach(
+            function(name) {
+
+               setParam(
+                  name,
+                  defaultParams[name]
+               );
+
+            }
+         );
+
+
+         setParam(
+            "appname",
+            appID
+         );
+
+
+         var filename =
+            getURLParam("file");
+
+
+         if (filename) {
+
+            setParam(
+               "filename",
+               filename
+            );
+
+         }
+
+      }
+
+
+      /*
+       * Nur die Darstellung des nativen Pickers verändern.
+       *
+       * Die GeoGebra-Eventhandler bleiben unangetastet.
+       */
+
+      function simplifySuitePicker() {
+
+         const picker =
+            document.getElementById(
+               "suiteAppPicker"
+            );
+
+
+         if (!picker) {
+            return;
+         }
+
+
+         /*
+          * Alle Texte ausblenden.
+          */
+
+         picker
+            .querySelectorAll(
+               "span, .gwt-Label"
+            )
+            .forEach(
+               function(element) {
+                  element.style.display =
+                     "none";
+               }
+            );
+
+
+         /*
+          * Wenn GeoGebra seine Modi über Elemente mit
+          * erkennbaren Titeln/aria-labels erzeugt, ersetzen
+          * wir ausschließlich das sichtbare Icon.
+          */
+
+         picker
+            .querySelectorAll(
+               "[title], [aria-label]"
+            )
+            .forEach(
+               function(element) {
+
+                  const label = (
+                     element.getAttribute(
+                        "title"
+                     ) ||
+                     element.getAttribute(
+                        "aria-label"
+                     ) ||
+                     ""
+                  ).toLowerCase();
+
+
+                  let icon = null;
+
+
+                  if (
+                     label.includes("graph") ||
+                     label.includes("graf")
+                  ) {
+                     icon =
+                        APP_ICONS.graphing;
+                  }
+                  else if (
+                     label.includes("3d")
+                  ) {
+                     icon =
+                        APP_ICONS["3d"];
+                  }
+                  else if (
+                     label.includes("geo")
+                  ) {
+                     icon =
+                        APP_ICONS.geometry;
+                  }
+                  else if (
+                     label.includes("cas")
+                  ) {
+                     icon =
+                        APP_ICONS.cas;
+                  }
+                  else if (
+                     label.includes("prob") ||
+                     label.includes("wahrschein")
+                  ) {
+                     icon =
+                        APP_ICONS.probability;
+                  }
+                  else if (
+                     label.includes("scient") ||
+                     label.includes("taschen")
+                  ) {
+                     icon =
+                        APP_ICONS.scientific;
+                  }
+
+
+                  if (!icon) {
+                     return;
+                  }
+
+
+                  let image =
+                     element.querySelector(
+                        "img"
+                     );
+
+
+                  if (!image) {
+
+                     image =
+                        document.createElement(
+                           "img"
+                        );
+
+                     element.insertBefore(
+                        image,
+                        element.firstChild
+                     );
+
+                  }
+
+
+                  image.src = icon;
+
+                  image.style.width =
+                     "36px";
+
+                  image.style.height =
+                     "36px";
+
+               }
+            );
+
+      }
+
+
+      /*
+       * Der Picker wird von GWT erst nachträglich erzeugt.
+       * MutationObserver reagiert darauf ohne Polling,
+       * sleep oder künstliche Wartezeit.
+       */
+
+      const pickerObserver =
+         new MutationObserver(
+            function() {
+               simplifySuitePicker();
+            }
+         );
+
+
+      function loadGeoGebra() {
+
+         configure();
+
+
+         pickerObserver.observe(
+            document.body,
+            {
+               childList: true,
+               subtree: true
+            }
+         );
+
+
+         const script =
+            document.createElement(
+               "script"
+            );
+
+
+         script.src =
+            codebase +
+            module +
+            "/" +
+            module +
+            ".nocache.js";
+
+
+         document.head.appendChild(
+            script
+         );
+
+      }
+
+
+      window.addEventListener(
+         "load",
+         loadGeoGebra
+      );
+
+   </script>
+
+</head>
+
+
+<body
+   dir="ltr"
+   tabindex="-1"
+>
+
+   <div
+      id="ggw"
+      class="geogebraweb"
+      data-param-app="true"
+   ></div>
+
+   <div id="suiteAppPicker"></div>
+
+</body>
+
+</html>
+EOF
+
+
+# ============================================================
+# start.sh
+# ============================================================
+
+cat > "$BASE/start.sh" <<'SHEOF'
+#!/bin/bash
+
+BASE="/opt/geogebra"
+
+CHROME="/opt/chrome/chrome"
+SERVER="$BASE/server.py"
+WWW="$BASE/www"
+
+PROFILE="$HOME/.local/share/geogebra/chrome"
+
+PORT="8765"
+
+START_FILE="${1:-}"
+
+SERVER_PID=""
+
+
+cleanup() {
+
+   if [ -n "$SERVER_PID" ]; then
+      kill "$SERVER_PID" 2>/dev/null || true
+   fi
+
+}
+
+
+trap cleanup EXIT INT TERM
+
+
+if [ ! -x "$CHROME" ]; then
+   echo "FEHLER: Chrome fehlt."
+   exit 1
+fi
+
+
+if [ ! -x "$SERVER" ]; then
+   echo "FEHLER: GeoGebra-Webserver fehlt."
+   exit 1
+fi
+
+
+mkdir -p "$PROFILE"
+
+
+# ============================================================
+# Server
+# ============================================================
+
+"$SERVER" \
+   >"/tmp/geogebra-server-${UID}.log" \
+   2>&1 &
+
+SERVER_PID=$!
+
+
+# ============================================================
+# URL
+# ============================================================
+
+URL="http://127.0.0.1:${PORT}/"
+
+
+if [ -n "$START_FILE" ] &&
+   [ -f "$START_FILE" ]; then
+
+   TARGET="$WWW/open/${UID}.ggb"
+
+   cp -- \
+      "$START_FILE" \
+      "$TARGET"
+
+   chmod 644 "$TARGET"
+
+   URL="http://127.0.0.1:${PORT}/?file=open/${UID}.ggb"
+
+fi
+
+
+# ============================================================
+# Chrome
+#
+# Absichtlich:
+#
+# - kein temporäres Profil
+# - kein --disk-cache-dir
+# - keine Cache-Löschung
+# - kein sleep
+# ============================================================
+
+"$CHROME" \
+   --ozone-platform=x11 \
+   --no-sandbox \
+   --password-store=basic \
+   --disable-infobars \
+   --no-first-run \
+   --no-default-browser-check \
+   --user-data-dir="$PROFILE" \
+   --app="$URL"
+
+
+# ============================================================
+# Server unmittelbar beenden
+# ============================================================
+
+kill "$SERVER_PID" 2>/dev/null || true
+
+SERVER_PID=""
+
+
+exit 0
+SHEOF
+
+chmod 755 "$BASE/start.sh"
+
+
+# ============================================================
+# Icon
+#
+# Bestehendes Icon behalten.
+# ============================================================
+
+if [ ! -f "$BASE/geogebra.svg" ]; then
+
+   cat > "$BASE/geogebra.svg" <<'SVGEOF'
+<svg
+   xmlns="http://www.w3.org/2000/svg"
+   viewBox="0 0 512 512"
+>
+   <rect
+      width="512"
+      height="512"
+      rx="90"
+      fill="#ffffff"
+   />
+
+   <path
+      d="M70 370 C120 110 190 90 256 256 C325 430 390 365 442 115"
+      fill="none"
+      stroke="#666666"
+      stroke-width="28"
+      stroke-linecap="round"
+   />
+
+   <circle
+      cx="166"
+      cy="151"
+      r="47"
+      fill="#9999ff"
+      stroke="#333333"
+      stroke-width="16"
+   />
+
+   <circle
+      cx="348"
+      cy="363"
+      r="47"
+      fill="#9999ff"
+      stroke="#333333"
+      stroke-width="16"
+   />
+</svg>
+SVGEOF
+
+fi
+
+
+chmod 644 "$BASE/geogebra.svg"
+
+
+# ============================================================
+# Alte eigene Desktop-Starter entfernen
+# ============================================================
+
+for FILE in /usr/share/applications/*.desktop; do
+
+   [ -f "$FILE" ] || continue
+
+   if grep -q '/opt/geogebra/start.sh' "$FILE"; then
+      rm -f "$FILE"
+   fi
+
+done
+
+
+# ============================================================
+# Genau einen Desktop-Starter erzeugen
+# ============================================================
+
+cat > "$DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=GeoGebra
+Comment=GeoGebra Rechner Suite
+Exec=$BASE/start.sh %f
+Icon=$BASE/geogebra.svg
+Terminal=false
+Categories=Education;Math;
+StartupNotify=true
+MimeType=application/vnd.geogebra.file;
+EOF
+
+
+chmod 644 "$DESKTOP"
+
+
+update-desktop-database \
+   /usr/share/applications \
+   2>/dev/null || true
+
+
+# ============================================================
+# Rechte
+# ============================================================
+
+chmod -R a+rX "$GGB"
+chmod -R a+rX "$WWW"
+
+chmod 1777 "$OPEN"
+
+
+# ============================================================
+# Fertig
+# ============================================================
+
+echo
+echo "============================================================"
+echo " GeoGebra installiert"
+echo "============================================================"
+echo
+
+if [ "$FORCE" = true ]; then
+   echo "Chrome:   neu installiert"
+   echo "GeoGebra: neu installiert"
+else
+   echo "Chrome:   vorhandene Installation verwendet"
+   echo "GeoGebra: vorhandene Installation verwendet"
+fi
+
+echo
+
+if [ "$EXAM_MODE" = true ]; then
+   echo "Modus: Prüfung"
+   echo "3D:    deaktiviert"
+else
+   echo "Modus: Normal"
+   echo "3D:    aktiviert"
+fi
+
+echo
+echo "Start:"
+echo "   /opt/geogebra/start.sh"
+echo
