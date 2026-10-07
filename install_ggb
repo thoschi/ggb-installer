@@ -51,6 +51,28 @@ for ARG in "$@"; do
 
          rm -rf "$BASE"
 
+         rm -f /usr/share/mime/packages/geogebra-local.xml
+         if command -v update-mime-database >/dev/null 2>&1; then
+            update-mime-database /usr/share/mime
+         fi
+         if command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PYEOF'
+import configparser
+from pathlib import Path
+path = Path('/etc/xdg/mimeapps.list')
+if path.exists():
+   config = configparser.ConfigParser(interpolation=None, strict=False)
+   config.optionxform = str
+   config.read(path)
+   section = 'Default Applications'
+   key = 'application/vnd.geogebra.file'
+   if config.has_section(section) and config[section].get(key) == 'geogebra-local.desktop;':
+      config.remove_option(section, key)
+      with path.open('w') as output:
+         config.write(output)
+PYEOF
+         fi
+
          update-desktop-database \
             /usr/share/applications \
             2>/dev/null || true
@@ -91,7 +113,7 @@ fi
 # Voraussetzungen
 # ============================================================
 
-for CMD in curl unzip python3; do
+for CMD in curl unzip python3 xprop xwininfo flock update-mime-database update-desktop-database; do
    if ! command -v "$CMD" >/dev/null 2>&1; then
       echo "FEHLER: $CMD fehlt."
       exit 1
@@ -549,6 +571,86 @@ cat > "$WWW/index.html" <<EOF
 
       };
 
+      // Das vollständige GGB-Archiv enthält auch Bilder und Skripte.
+      // Das persistente Chrome-Profil hält diesen Speicher über Neustarts.
+      const SESSION_KEY = "geogebra-local:last-document:v1";
+      let sessionApplet = null;
+      let restoringSession = false;
+      let lastOpenRequest = getURLParam("request");
+      let openingFile = false;
+
+      async function checkOpenRequest() {
+         const user = getURLParam("user");
+         if (!user || !sessionApplet || openingFile || restoringSession) return;
+         try {
+            const response = await fetch("/open/" + user + "-request.json", {cache: "no-store"});
+            if (!response.ok) return;
+            const request = await response.json();
+            if (request.id === lastOpenRequest) return;
+            lastOpenRequest = request.id;
+            if (!request.file) return;
+            saveSession();
+            openingFile = true;
+            restoringSession = true;
+            const fileResponse = await fetch(request.file, {cache: "no-store"});
+            if (!fileResponse.ok) throw new Error("Dateiabruf fehlgeschlagen");
+            const bytes = new Uint8Array(await fileResponse.arrayBuffer());
+            let binary = "";
+            for (let offset = 0; offset < bytes.length; offset += 8192) {
+               binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+            }
+            sessionApplet.setBase64(btoa(binary), function() {
+               openingFile = false;
+               restoringSession = false;
+               saveSession();
+            });
+         } catch (error) {
+            openingFile = false;
+            restoringSession = false;
+            console.error("GeoGebra konnte die angeforderte Datei nicht öffnen", error);
+         }
+      }
+
+      function saveSession() {
+         if (!sessionApplet || restoringSession) return;
+         try {
+            const archive = sessionApplet.getBase64();
+            if (archive) localStorage.setItem(SESSION_KEY, archive);
+         } catch (error) {
+            console.error("GeoGebra konnte den Bearbeitungsstand nicht speichern", error);
+            document.title = "GeoGebra – automatische Speicherung fehlgeschlagen";
+         }
+      }
+
+      window.ggbOnInit = function(name, api) {
+         sessionApplet = api || window[name] || window.ggbApplet;
+         if (!sessionApplet) return;
+         try {
+            const archive = localStorage.getItem(SESSION_KEY);
+            // Eine ausdrücklich geöffnete Datei hat Vorrang vor der Sitzung.
+            if (archive && !getURLParam("file")) {
+               restoringSession = true;
+               sessionApplet.setBase64(archive, function() {
+                  restoringSession = false;
+               });
+            }
+         } catch (error) {
+            restoringSession = false;
+            console.error("GeoGebra konnte den Bearbeitungsstand nicht laden", error);
+         }
+         for (const method of ["registerAddListener", "registerRemoveListener",
+                               "registerUpdateListener", "registerClearListener",
+                               "registerClientListener"]) {
+            if (typeof sessionApplet[method] === "function") {
+               sessionApplet[method](saveSession);
+            }
+         }
+         setInterval(saveSession, 2000);
+         setInterval(checkOpenRequest, 1000);
+         window.addEventListener("pagehide", saveSession);
+         window.addEventListener("beforeunload", saveSession);
+      };
+
 
       /*
        * Die sechs vom Benutzer gelieferten Originalsymbole.
@@ -599,38 +701,17 @@ cat > "$WWW/index.html" <<EOF
 
 
       function configure() {
-
-         Object.keys(defaultParams).forEach(
-            function(name) {
-
-               setParam(
-                  name,
-                  defaultParams[name]
-               );
-
+         const params = Object.assign({}, defaultParams, {
+            id: "ggbApplet",
+            appName: appID,
+            randomize: false,
+            appletOnLoad: function(api) {
+               window.ggbOnInit("ggbApplet", api);
             }
-         );
-
-
-         setParam(
-            "appname",
-            appID
-         );
-
-
-         var filename =
-            getURLParam("file");
-
-
-         if (filename) {
-
-            setParam(
-               "filename",
-               filename
-            );
-
-         }
-
+         });
+         const filename = getURLParam("file");
+         if (filename) params.filename = filename;
+         return params;
       }
 
 
@@ -793,9 +874,6 @@ cat > "$WWW/index.html" <<EOF
 
       function loadGeoGebra() {
 
-         configure();
-
-
          pickerObserver.observe(
             document.body,
             {
@@ -811,13 +889,12 @@ cat > "$WWW/index.html" <<EOF
             );
 
 
-         script.src =
-            codebase +
-            module +
-            "/" +
-            module +
-            ".nocache.js";
-
+         script.src = "/GeoGebra/deployggb.js";
+         script.onload = function() {
+            const applet = new GGBApplet(configure(), true);
+            applet.setHTML5Codebase(codebase + module + "/");
+            applet.inject("ggw");
+         };
 
          document.head.appendChild(
             script
@@ -869,15 +946,22 @@ SERVER="$BASE/server.py"
 WWW="$BASE/www"
 
 PROFILE="$HOME/.local/share/geogebra/chrome"
+STATE="$HOME/.local/share/geogebra"
 
 PORT="8765"
 
 START_FILE="${1:-}"
 
 SERVER_PID=""
+WINDOW_PID=""
 
 
 cleanup() {
+
+   if [ -n "$WINDOW_PID" ]; then
+      kill "$WINDOW_PID" 2>/dev/null || true
+      wait "$WINDOW_PID" 2>/dev/null || true
+   fi
 
    if [ -n "$SERVER_PID" ]; then
       kill "$SERVER_PID" 2>/dev/null || true
@@ -903,6 +987,38 @@ fi
 
 mkdir -p "$PROFILE"
 
+# Eindeutige Dateinamen vermeiden alte Dateiinhalte bei wiederholtem Öffnen.
+REQUEST_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+OPEN_FILE=""
+if [ -n "$START_FILE" ]; then
+   if [ ! -f "$START_FILE" ]; then
+      echo "FEHLER: Datei nicht gefunden: $START_FILE"
+      exit 1
+   fi
+   TARGET="$WWW/open/${UID}-${REQUEST_ID}.ggb"
+   cp -- "$START_FILE" "$TARGET" || exit 1
+   chmod 644 "$TARGET"
+   OPEN_FILE="open/${UID}-${REQUEST_ID}.ggb"
+fi
+
+python3 - "$WWW/open/${UID}-request.json" "$REQUEST_ID" "$OPEN_FILE" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+temporary = path.with_name(path.name + '.' + sys.argv[2] + '.tmp')
+temporary.write_text(json.dumps({'id': sys.argv[2], 'file': sys.argv[3]}))
+temporary.replace(path)
+PYEOF
+
+# Ein Starter pro Benutzer: Chrome reicht neue Aufrufe sonst an einen
+# vorhandenen Prozess weiter und der zweite Starter beendet seinen Server.
+exec 9>"$STATE/launcher.lock"
+if ! flock -n 9; then
+   echo "Öffnungsanfrage an das laufende GeoGebra übergeben."
+   exit 0
+fi
+
 
 # ============================================================
 # Server
@@ -914,27 +1030,39 @@ mkdir -p "$PROFILE"
 
 SERVER_PID=$!
 
+# Chrome erst starten, wenn die lokale Seite tatsächlich erreichbar ist.
+if ! python3 - "$SERVER_PID" "$PORT" <<'PYEOF'
+import os
+import sys
+import time
+import urllib.request
+pid, port = map(int, sys.argv[1:])
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+   try:
+      os.kill(pid, 0)
+      with urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=0.5) as response:
+         if response.status == 200:
+            sys.exit(0)
+   except (OSError, ValueError):
+      pass
+   time.sleep(0.1)
+sys.exit('GeoGebra-Webserver ist nicht bereit; siehe /tmp/geogebra-server-*.log')
+PYEOF
+then
+   exit 1
+fi
+
 
 # ============================================================
 # URL
 # ============================================================
 
-URL="http://127.0.0.1:${PORT}/"
+URL="http://127.0.0.1:${PORT}/?user=${UID}&request=${REQUEST_ID}"
 
 
-if [ -n "$START_FILE" ] &&
-   [ -f "$START_FILE" ]; then
-
-   TARGET="$WWW/open/${UID}.ggb"
-
-   cp -- \
-      "$START_FILE" \
-      "$TARGET"
-
-   chmod 644 "$TARGET"
-
-   URL="http://127.0.0.1:${PORT}/?file=open/${UID}.ggb"
-
+if [ -n "$OPEN_FILE" ]; then
+   URL="$URL&file=$OPEN_FILE"
 fi
 
 
@@ -946,8 +1074,13 @@ fi
 # - kein temporäres Profil
 # - kein --disk-cache-dir
 # - keine Cache-Löschung
-# - kein sleep
+# - keine Cache-Löschung beim Neustart
 # ============================================================
+
+WINDOW_ARGS=()
+if [ -f "$STATE/window.json" ]; then
+   mapfile -t WINDOW_ARGS < <(python3 "$BASE/window_state.py" --arguments "$STATE/window.json")
+fi
 
 "$CHROME" \
    --ozone-platform=x11 \
@@ -957,7 +1090,14 @@ fi
    --no-first-run \
    --no-default-browser-check \
    --user-data-dir="$PROFILE" \
-   --app="$URL"
+   --class=geogebra-local \
+   "${WINDOW_ARGS[@]}" \
+   --app="$URL" &
+
+CHROME_PID=$!
+python3 "$BASE/window_state.py" --watch "$STATE/window.json" "$CHROME_PID" &
+WINDOW_PID=$!
+wait "$CHROME_PID"
 
 
 # ============================================================
@@ -973,6 +1113,77 @@ exit 0
 SHEOF
 
 chmod 755 "$BASE/start.sh"
+
+# X11-Fensterzustand unabhängig von Chromes App-URL und Cache speichern.
+cat > "$BASE/window_state.py" <<'PYEOF'
+#!/usr/bin/env python3
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def arguments(path):
+   try:
+      state = json.loads(Path(path).read_text())
+      x, y, width, height = (state[key] for key in ("x", "y", "width", "height"))
+      if not all(type(value) is int for value in (x, y, width, height)):
+         return []
+      if not (200 <= width <= 32768 and 200 <= height <= 32768):
+         return []
+      return [f"--window-position={x},{y}", f"--window-size={width},{height}"]
+   except (OSError, ValueError, KeyError, TypeError):
+      return []
+
+
+def window_state():
+   clients = subprocess.check_output(["xprop", "-root", "_NET_CLIENT_LIST"], text=True, stderr=subprocess.DEVNULL)
+   for window in re.findall(r"0x[0-9a-fA-F]+", clients):
+      props = subprocess.check_output(["xprop", "-id", window, "WM_CLASS", "_NET_WM_STATE", "_NET_FRAME_EXTENTS"], text=True, stderr=subprocess.DEVNULL)
+      if '"geogebra-local"' not in props:
+         continue
+      # Nicht die maximierten Abmessungen als normale Fenstergröße speichern.
+      if "_NET_WM_STATE_MAXIMIZED" in props or "_NET_WM_STATE_FULLSCREEN" in props:
+         continue
+      info = subprocess.check_output(["xwininfo", "-id", window], text=True, stderr=subprocess.DEVNULL)
+      labels = ("Absolute upper-left X", "Absolute upper-left Y", "Width", "Height")
+      values = [int(re.search(re.escape(label) + r":\s*(-?\d+)", info).group(1)) for label in labels]
+      frame = re.search(r"_NET_FRAME_EXTENTS\([^)]*\) = (\d+), (\d+), (\d+), (\d+)", props)
+      if frame:
+         left, right, top, bottom = map(int, frame.groups())
+         values = [values[0] - left, values[1] - top, values[2] + left + right, values[3] + top + bottom]
+      return dict(zip(("x", "y", "width", "height"), values))
+   return None
+
+
+def watch(path, pid):
+   previous = None
+   while True:
+      try:
+         os.kill(pid, 0)
+      except ProcessLookupError:
+         return
+      try:
+         state = window_state()
+         if state and state != previous:
+            temporary = Path(str(path) + ".tmp")
+            temporary.write_text(json.dumps(state))
+            temporary.replace(path)
+            previous = state
+      except (OSError, subprocess.SubprocessError, AttributeError, ValueError) as error:
+         print(f"Fensterzustand konnte nicht ermittelt werden: {error}", file=sys.stderr)
+      time.sleep(0.25)
+
+
+if __name__ == "__main__":
+   if sys.argv[1] == "--arguments":
+      print("\n".join(arguments(sys.argv[2])))
+   elif sys.argv[1] == "--watch":
+      watch(Path(sys.argv[2]), int(sys.argv[3]))
+PYEOF
 
 
 # ============================================================
@@ -1054,6 +1265,7 @@ Type=Application
 Name=GeoGebra
 Comment=GeoGebra Rechner Suite
 Exec=$BASE/start.sh %f
+TryExec=$BASE/start.sh
 Icon=$BASE/geogebra.svg
 Terminal=false
 Categories=Education;Math;
@@ -1063,6 +1275,35 @@ EOF
 
 
 chmod 644 "$DESKTOP"
+
+mkdir -p /usr/share/mime/packages
+cat > /usr/share/mime/packages/geogebra-local.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.geogebra.file">
+    <comment>GeoGebra document</comment>
+    <glob pattern="*.ggb"/>
+  </mime-type>
+</mime-info>
+EOF
+update-mime-database /usr/share/mime
+
+# Systemweite Vorgabe, ohne vorhandene Zuordnungen anderer Typen zu ersetzen.
+python3 - <<'PYEOF'
+import configparser
+from pathlib import Path
+path = Path('/etc/xdg/mimeapps.list')
+config = configparser.ConfigParser(interpolation=None, strict=False)
+config.optionxform = str
+if path.exists():
+   config.read(path)
+if not config.has_section('Default Applications'):
+   config.add_section('Default Applications')
+config['Default Applications']['application/vnd.geogebra.file'] = 'geogebra-local.desktop;'
+path.parent.mkdir(parents=True, exist_ok=True)
+with path.open('w') as output:
+   config.write(output)
+PYEOF
 
 
 update-desktop-database \
